@@ -45,6 +45,7 @@ enum : NvU32 {
     kCmdDispGetSupported  = 0x00730107u,   /* NV0073_CTRL_CMD_SYSTEM_GET_SUPPORTED */
     kCmdDispGetEdidV2     = 0x00730245u,   /* NV0073_CTRL_CMD_SPECIFIC_GET_EDID_V2 */
     kCmdDispGetI2cPortId  = 0x00730211u,   /* NV0073_CTRL_CMD_SPECIFIC_GET_I2C_PORTID */
+    kCmdDispOrGetInfo     = 0x0073028bu,   /* NV0073_CTRL_CMD_SPECIFIC_OR_GET_INFO */
     kCmdDpAuxI2cTransfer  = 0x0073137cu,   /* NV0073_CTRL_CMD_DP_AUXCH_I2C_TRANSFER_CTRL */
     kCmdI2cTransaction    = 0x402c0105u,   /* NV402C_CTRL_CMD_I2C_TRANSACTION */
     kGpuInvalidId = 0xffffffffu,
@@ -68,6 +69,9 @@ struct Sub0Alloc   { NvU32 subDeviceId; };
 struct GetSupported{ NvU32 subDeviceInstance, displayMask, displayMaskDDC; };
 struct GetEdidV2   { NvU32 subDeviceInstance, displayId, bufferSize, flags; NvU8 edidBuffer[2048]; };
 struct GetI2cPort  { NvU32 subDeviceInstance, displayId, commPortId, ddcPortId; };
+struct OrGetInfo   { NvU32 subDeviceInstance, displayId, index, type, protocol, ditherType, ditherAlgo, location, rootPortId,
+                           dcbIndex; NvU64 vbiosAddress __attribute__((aligned(8))); NvU8 bIsLitByVbios, bIsDispDynamic; };
+static_assert(sizeof(OrGetInfo) == 56, "NV0073_CTRL_SPECIFIC_OR_GET_INFO_PARAMS layout");
 struct DpAuxI2c    { NvU32 subDeviceInstance, displayId, addr; NvU8 bWrite; NvU8 data[256]; NvU32 size; };
 static_assert(__builtin_offsetof(DpAuxI2c, data) == 13 && __builtin_offsetof(DpAuxI2c, size) == 272 &&
               sizeof(DpAuxI2c) == 276, "NV0073_CTRL_DP_AUXCH_I2C_TRANSFER_CTRL_PARAMS layout");
@@ -78,7 +82,7 @@ struct I2cTrans    { NvU8 portId; NvU8 pad[3]; NvU32 flags; NvU16 deviceAddress;
 static_assert(__builtin_offsetof(I2cTrans, transData) == 16 && sizeof(I2cTrans) == 96, "NV402C_CTRL_I2C_TRANSACTION_PARAMS layout");
 static_assert(sizeof(Dev0Alloc) == 56 && sizeof(GetEdidV2) == 2064 && sizeof(GetI2cPort) == 16 && sizeof(GetSupported) == 12 &&
               sizeof(AttachIds) == 132, "RM control/alloc parameter sizes (RM rejects a size mismatch)");
-enum : NvU32 { kTransI2cBlockRw = 2, kEdidCopyCache = 1, kI2cPortNone = 0 };
+enum : NvU32 { kTransI2cBlockRw = 2, kEdidCopyCache = 1, kI2cPortNone = 0, kOrTypeSor = 2, kOrProtoDpA = 8, kOrProtoDpB = 9 };
 
 /* ---- NVRM entry points, located from nv_xnu_phys_for_kernel_va (see header) ---- */
 typedef void (*RmapiOpFn)(void *sp, void *ops);
@@ -262,14 +266,42 @@ NvU32 NVRMNVDAFramebuffer::ddcFindDisplay()
     return hit;
 }
 
-// One raw I2C transfer to 7-bit address `addr`. Called with gS.lock held, inside the PM gate, display known.
+// How to reach the display found by ddcFindDisplay: DisplayPort (an SOR running DP) over AUX, anything else through its
+// DDC port. Called with gS.lock held, inside the PM gate.
+bool NVRMNVDAFramebuffer::ddcSetupPath()
+{
+    using namespace nvddc;
+    OrGetInfo oi; zero(&oi, sizeof oi); oi.displayId = fDdcDisplayId;
+    NvU32 st = rmControl(gS.hDisp, kCmdDispOrGetInfo, &oi, sizeof oi);
+    if (st == 0 && oi.type == kOrTypeSor && (oi.protocol == kOrProtoDpA || oi.protocol == kOrProtoDpB)) {
+        fDdcMode = 1;
+        ddcStatus("display 0x%x: DisplayPort, I2C over AUX", (unsigned)fDdcDisplayId);
+        return true;
+    }
+    GetI2cPort gp; zero(&gp, sizeof gp); gp.displayId = fDdcDisplayId;
+    NvU32 s2 = rmControl(gS.hDisp, kCmdDispGetI2cPortId, &gp, sizeof gp);
+    if (s2 || gp.ddcPortId == kI2cPortNone) {
+        ddcStatus("display 0x%x: OR 0x%x type %u protocol %u, no DDC port (0x%x)", (unsigned)fDdcDisplayId, (unsigned)st,
+                  (unsigned)oi.type, (unsigned)oi.protocol, (unsigned)s2);
+        return false;
+    }
+    if (!gS.hI2c && (s2 = rmAlloc(gS.hClient, gS.hSub, kClsI2c, nullptr, 0, &gS.hI2c))) {
+        ddcStatus("NV40_I2C alloc failed 0x%x", (unsigned)s2);
+        return false;
+    }
+    fDdcPort = gp.ddcPortId - 1; fDdcMode = 2;
+    ddcStatus("display 0x%x: protocol %u, DDC port %u", (unsigned)fDdcDisplayId, (unsigned)oi.protocol, (unsigned)fDdcPort);
+    return true;
+}
+
+// One raw I2C transfer to 7-bit address `addr`. Called with gS.lock held, inside the PM gate, path set up.
 IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 len)
 {
     using namespace nvddc;
     if (len == 0) return kIOReturnSuccess;
     if (len > 256) return kIOReturnBadArgument;
     NvU32 st;
-    if (fDdcMode != 2) {      // DisplayPort: I2C over AUX
+    if (fDdcMode == 1) {
         DpAuxI2c *p = (DpAuxI2c *)IOMalloc(sizeof(DpAuxI2c));
         if (!p) return kIOReturnNoMemory;
         zero(p, sizeof *p);
@@ -278,27 +310,13 @@ IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 le
         st = rmControl(gS.hDisp, kCmdDpAuxI2cTransfer, p, sizeof *p);
         if (st == 0 && !write) memcpy(buf, p->data, p->size < len ? p->size : len);
         IOFree(p, sizeof(DpAuxI2c));
-        if (st == 0) { fDdcMode = 1; return kIOReturnSuccess; }
-        fDdcLastStatus = st;
-        if (fDdcMode == 1) return kIOReturnIOError;      // a DP sink that worked before: a real bus error
-        // Never worked over AUX: not a DP display, use its DDC port
-        GetI2cPort gp; zero(&gp, sizeof gp); gp.displayId = fDdcDisplayId;
-        NvU32 s2 = rmControl(gS.hDisp, kCmdDispGetI2cPortId, &gp, sizeof gp);
-        if (s2 || gp.ddcPortId == kI2cPortNone) {
-            ddcStatus("display 0x%x: AUX 0x%x, no DDC port (0x%x)", (unsigned)fDdcDisplayId, (unsigned)st, (unsigned)s2);
-            return kIOReturnNoDevice;
-        }
-        if (!gS.hI2c && (s2 = rmAlloc(gS.hClient, gS.hSub, kClsI2c, nullptr, 0, &gS.hI2c))) {
-            ddcStatus("NV40_I2C alloc failed 0x%x", (unsigned)s2);
-            return kIOReturnNoResources;
-        }
-        fDdcPort = gp.ddcPortId - 1; fDdcMode = 2;
-        ddcStatus("display 0x%x: not DisplayPort (AUX 0x%x), DDC port %u", (unsigned)fDdcDisplayId, (unsigned)st, (unsigned)fDdcPort);
-    }
-    I2cTrans t; zero(&t, sizeof t);
-    t.portId = (NvU8)fDdcPort; t.deviceAddress = (NvU16)(addr << 1); t.transType = kTransI2cBlockRw;
-    t.transData.block.bWrite = write; t.transData.block.messageLength = len; t.transData.block.pMessage = (NvU64)(uintptr_t)buf;
-    st = rmControl(gS.hI2c, kCmdI2cTransaction, &t, sizeof t);
+    } else if (fDdcMode == 2) {
+        I2cTrans t; zero(&t, sizeof t);
+        t.portId = (NvU8)fDdcPort; t.deviceAddress = (NvU16)(addr << 1); t.transType = kTransI2cBlockRw;
+        t.transData.block.bWrite = write; t.transData.block.messageLength = len;
+        t.transData.block.pMessage = (NvU64)(uintptr_t)buf;
+        st = rmControl(gS.hI2c, kCmdI2cTransaction, &t, sizeof t);
+    } else return kIOReturnNoDevice;
     if (st) { fDdcLastStatus = st; return kIOReturnIOError; }
     return kIOReturnSuccess;
 }
@@ -345,10 +363,8 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
             // EDID changed (another monitor on this connector): find the RM display again
             NvU32 key = 0; for (unsigned i = 8; i < 12 && i < fEdidSize; i++) key = (key << 8) | fEdid[i];
             if (fDdcEdidKey != key) { fDdcEdidKey = key; fDdcDisplayId = 0; fDdcMode = 0; }
-            if (!fDdcDisplayId) {
-                fDdcDisplayId = ddcFindDisplay();
-                if (fDdcDisplayId) ddcStatus("display 0x%x", (unsigned)fDdcDisplayId);
-            }
+            if (!fDdcDisplayId) { fDdcDisplayId = ddcFindDisplay(); fDdcMode = 0; }
+            if (fDdcDisplayId && !fDdcMode && !ddcSetupPath()) fDdcDisplayId = 0;
             if (!fDdcDisplayId) err = kIOReturnNoDevice;
         }
         if (err == kIOReturnSuccess && doSend) {
