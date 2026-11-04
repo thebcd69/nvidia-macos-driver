@@ -31,12 +31,18 @@ jobs:
           set -euo pipefail
           D="$RUNNER_TEMP/rel"; mkdir -p "$D"
           curl -sSfL -o "$D/p.tgz" https://github.com/nullmoth/nvidia-macos-driver/releases/download/v2.7.1/nullmoth-nvidia-2.7.1.tar.gz
-          tar -xzf "$D/p.tgz" -C "$D" pkgroot/Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
+          tar -xzf "$D/p.tgz" -C "$D" pkgroot/Library/Extensions/NVRM.kext/Contents/MacOS/NVRM pkgroot/Library/Extensions/NVRMFB.kext/Contents/MacOS/NVRMFB
           N="$D/pkgroot/Library/Extensions/NVRM.kext/Contents/MacOS/NVRM"
           echo "9afb717cfb481636855058da67f5008bcb953f6a5896d92593c20f1083556e27  $N" | shasum -a 256 -c
           python3 -I tools/ddc/sig-check.py "$N"
       - name: Build NVRMFB
-        run: bash kexts/NVRMFB/build.sh "$RUNNER_TEMP/MacKernelSDK" "$RUNNER_TEMP/ogkm" out 2.7.1
+        run: mkdir -p out && bash kexts/NVRMFB/build.sh "$RUNNER_TEMP/MacKernelSDK" "$RUNNER_TEMP/ogkm" "$GITHUB_WORKSPACE/out" 2.7.1   # build.sh cds into fb/
+      - name: New kernel symbols vs the official 2.7.1 NVRMFB
+        run: |
+          O="$RUNNER_TEMP/rel/pkgroot/Library/Extensions/NVRMFB.kext/Contents/MacOS/NVRMFB"
+          nm -u "$O" | sort > "$RUNNER_TEMP/u-official.txt"
+          nm -u out/NVRMFB.kext/Contents/MacOS/NVRMFB | sort > "$RUNNER_TEMP/u-ddc.txt"
+          echo "undefined in the DDC build only:"; comm -13 "$RUNNER_TEMP/u-official.txt" "$RUNNER_TEMP/u-ddc.txt" | tee out/new-symbols.txt
       - name: Build ddcprobe
         run: clang -O2 -Wall -arch x86_64 -mmacosx-version-min=15.0 -framework IOKit -framework CoreFoundation tools/ddcprobe.c -o out/ddcprobe
       - name: Package
@@ -46,7 +52,7 @@ jobs:
           file out/NVRMFB.kext/Contents/MacOS/NVRMFB
           cp tools/ddc-install.sh docs/DDC-STATUS.md out/
           (cd out && shasum -a 256 NVRMFB.kext/Contents/MacOS/NVRMFB ddcprobe > SHA256SUMS && \
-             zip -qr "../NVRMFB-ddc-claude-$SHA.zip" NVRMFB.kext ddcprobe ddc-install.sh DDC-STATUS.md SHA256SUMS undefined.txt)
+             zip -qr "../NVRMFB-ddc-claude-$SHA.zip" NVRMFB.kext ddcprobe ddc-install.sh DDC-STATUS.md SHA256SUMS undefined.txt new-symbols.txt)
           ls -l "NVRMFB-ddc-claude-$SHA.zip"
       - uses: actions/upload-artifact@v4
         with:
