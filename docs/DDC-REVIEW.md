@@ -1,5 +1,9 @@
 # `ddc` branch incelemesi (fork/ddc @ 87e01de) — erken red nedeni ve bulgular
 
+> **Güncelleme (023f65c):** §1'deki "en olası: `resolve`" hipotezi resmî 2.7.1 paketiyle çürütüldü (NVRM
+> `CFBundleVersion` = 2.7.1, imzalar tutuyor). Asıl neden `display` aşaması: DP hedefinin EDID'i RM önbelleğinde yok.
+> Ayrıntı ve düzeltme: `docs/DDC-STATUS.md`. §2'deki 3, 5, 6, 7. maddeler uygulandı.
+
 Statik inceleme; donanım erişimi yok. Kaynaklar: Apple IOGraphics-600 (`IOFramebuffer.cpp`, `IOI2CInterface.cpp`),
 NVIDIA open-gpu-kernel-modules 615.78.08, NullMoth v2.7.1 kaynağı.
 

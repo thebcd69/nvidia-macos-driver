@@ -9,6 +9,7 @@ awk '/^namespace nvddc \{/{on=1} /^\/\* ---- NVRM entry points/{on=0} on' "$INC"
 grep -q 'struct I2cTrans' "$T/nvddc-mirror.h" || { echo "STOP: mirror block not found in $INC"; exit 1; }
 echo '}' >> "$T/nvddc-mirror.h"
 S="$OGKM/src/common/sdk/nvidia/inc"; U="$OGKM/src/nvidia/arch/nvalloc/unix/include"
-${CXX:-clang++} -std=c++17 -fsyntax-only -m64 -Wno-unused-value \
+A=-m64; [ "$(uname)" = Darwin ] && A="-arch x86_64"
+${CXX:-clang++} -std=c++17 -fsyntax-only $A -Wno-unused-value \
   -I"$T" -I"$S" -I"$S/ctrl" -I"$S/class" -I"$OGKM/src/common/inc" -I"$U" "$HERE/abi-check.cpp"
 echo "abi-check: nvrm-ddc.inc RM mirrors match open-gpu-kernel-modules ($(git -C "$OGKM" describe --tags 2>/dev/null || echo "$OGKM"))"

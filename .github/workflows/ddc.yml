@@ -1,0 +1,62 @@
+# thebcd69 fork (personal use, not for upstream), branch ddc-ci-claude: NVRMFB with DDC/CI (docs/DDC-STATUS.md).
+# Builds NVRMFB.kext and ddcprobe, checks nvrm-ddc.inc's RM struct mirrors against NVIDIA's headers and its NVRM
+# entry-point signatures against the official NullMoth 2.7.1 NVRM, and publishes a pre-release ddc-claude-<sha>.
+# NVRM.kext itself cannot be built from this repository (see docs/DDC-STATUS.md, "CI").
+name: NVRMFB DDC (claude)
+on:
+  push:
+    branches: [ddc-ci-claude]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain and sources
+        run: |
+          set -euo pipefail
+          X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version
+          git clone -q --depth 1 https://github.com/acidanthera/MacKernelSDK "$RUNNER_TEMP/MacKernelSDK"
+          git clone -q --depth 1 --branch 615.78.08 --filter=blob:none --sparse https://github.com/NVIDIA/open-gpu-kernel-modules "$RUNNER_TEMP/ogkm"
+          git -C "$RUNNER_TEMP/ogkm" sparse-checkout set kernel-open/nvidia-modeset kernel-open/common/inc \
+            src/common/sdk/nvidia/inc src/common/inc src/nvidia/arch/nvalloc/unix/include
+      - name: RM ABI mirror check
+        run: bash tools/ddc/abi-check.sh "$RUNNER_TEMP/ogkm"
+      - name: NVRM signature check (official NullMoth 2.7.1)
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/rel"; mkdir -p "$D"
+          curl -sSfL -o "$D/p.tgz" https://github.com/nullmoth/nvidia-macos-driver/releases/download/v2.7.1/nullmoth-nvidia-2.7.1.tar.gz
+          tar -xzf "$D/p.tgz" -C "$D" pkgroot/Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
+          N="$D/pkgroot/Library/Extensions/NVRM.kext/Contents/MacOS/NVRM"
+          echo "9afb717cfb481636855058da67f5008bcb953f6a5896d92593c20f1083556e27  $N" | shasum -a 256 -c
+          python3 -I tools/ddc/sig-check.py "$N"
+      - name: Build NVRMFB
+        run: bash kexts/NVRMFB/build.sh "$RUNNER_TEMP/MacKernelSDK" "$RUNNER_TEMP/ogkm" out 2.7.1
+      - name: Build ddcprobe
+        run: clang -O2 -Wall -arch x86_64 -mmacosx-version-min=15.0 -framework IOKit -framework CoreFoundation tools/ddcprobe.c -o out/ddcprobe
+      - name: Package
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          file out/NVRMFB.kext/Contents/MacOS/NVRMFB
+          cp tools/ddc-install.sh docs/DDC-STATUS.md out/
+          (cd out && shasum -a 256 NVRMFB.kext/Contents/MacOS/NVRMFB ddcprobe > SHA256SUMS && \
+             zip -qr "../NVRMFB-ddc-claude-$SHA.zip" NVRMFB.kext ddcprobe ddc-install.sh DDC-STATUS.md SHA256SUMS undefined.txt)
+          ls -l "NVRMFB-ddc-claude-$SHA.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NVRMFB-ddc-claude
+          path: NVRMFB-ddc-claude-*.zip
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          gh release create "ddc-claude-$SHA" "NVRMFB-ddc-claude-$SHA.zip" --prerelease --target "$GITHUB_SHA" \
+            --title "NVRMFB DDC (claude) $SHA" \
+            --notes "Kişisel fork derlemesi: NullMoth 2.7.1 üzerine DDC/CI'lı NVRMFB (GU605MY + PG27AQDM). Resmî NullMoth sürümü değildir. Kurulum ve geri alma: DDC-STATUS.md (zip içinde). NullMoth © NullMoth Systems, PolyForm Noncommercial 1.0.0."

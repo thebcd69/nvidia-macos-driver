@@ -1,81 +1,71 @@
-# DDC/CI — durum ve tasarım (branch `ddc-ci-claude`)
+# DDC/CI (NVIDIA yolu) — durum, kurulum, geri alma (branch `ddc-ci-claude`)
 
-**Sahibin kararı (2026-11-04): DDC en son öncelik.** Önce Intel iGPU görüntü verecek, Metal çalışacak ve sol USB-C portu
-harici monitörü sürecek; DDC ancak ondan sonra. Bu belge kaldığı yeri ve sonraki adımları kaydeder.
+Kişisel, ticari olmayan fork (thebcd69). NullMoth kodu © NullMoth Systems, PolyForm Noncommercial 1.0.0 (`LICENSE`,
+`NOTICE`); bu daldaki değişiklikler aynı lisansla. Upstream'e PR/issue açılmaz (`AGENTS.md`).
+Taban: `fork/ddc` 87e01de (Mac'teki ajanın çalışması); `ddc` ve `main` değiştirilmez.
+Öncelik: önce Intel iGPU görüntü/Metal/USB-C, DDC en son — bu dal sahibi bekletmez, paralel yürür.
 
-Bu branch `fork/ddc` (87e01de, Mac'teki ajanın çalışması) üzerine kuruludur; `ddc`, `main` değiştirilmedi.
+## Erken reddin nedeni (bulundu, düzeltildi — donanımda henüz denenmedi)
+`ddc` dalı, çerçeve tamponunun hangi RM ekranı olduğunu RM'in **önbellekteki EDID'i** (`GET_EDID_V2` + `COPY_CACHE`)
+ile bizim EDID'i karşılaştırarak buluyordu. NVKMS, DisplayPort hedefinin EDID'ini RM üzerinden değil **kendi DP
+kütüphanesiyle** okur (`nvkms-dpy.c` → `ReadEdidFromDP`); RM önbelleği DP ekranı için boş kalır. PG27AQDM NVIDIA'da
+USB-C/DP üzerinden bağlı olduğundan her istek `display` aşamasında `kIOReturnNoDevice` ile, veri dönmeden düşer.
 
-## Yapıldı
-- `tools/ddc/abi-check.sh` + `abi-check.cpp`: `nvrm-ddc.inc`'teki RM struct/sabit kopyalarını NVIDIA 615.78.08
-  başlıklarıyla derleme zamanında alan alan karşılaştırır (Linux/macOS, `abi-check.sh <ogkm>`). Geçti; negatif test
-  (alan yeri değişince derleme hatası) doğrulandı.
-- `docs/DDC-REVIEW.md`: `ddc` dalının statik incelemesi, erken red nedeni adayları ve düzeltme önerileri.
+Düzeltme (`023f65c`): NVKMS ekran tanıtıcısı (`fDisplay`), MST olmayan bir ekranda bağlayıcının RM displayId bitidir
+(`nvkms-rm.c` bağlayıcıları `GET_SUPPORTED` maskesinden kurar; `nvAllocDpyEvo(.., displayId)`; KAPI tanıtıcısı
+`nvDpyIdToNvU32`). Artık doğrudan o kullanılıyor; MST'de (dinamik id) bus kapalı kalır.
 
-## Yapılmadı (bilinçli olarak — öncelik değişti)
-- NVIDIA tarafında kod düzeltmesi (öneriler DDC-REVIEW.md'de), CI iş akışı `ddc.yml`, `DDC-KURULUM.md`.
-- Intel tarafı (`thebcd69/WTLIntelGfx`, `gu605-ddc`) — dal açılmadı; tasarım aşağıda.
-- ghelper-mac `ddc-slider` — dal açılmadı; tasarım aşağıda.
+Eski hipotez düzeltmesi: "`nvrm-kext-version` 2.7.1 değil" **yanlıştı** — resmî 2.7.1 paketinde NVRM `CFBundleVersion`
+= 2.7.1. Dört talimat-bayt imzası da resmî NVRM'de (sha256 `9afb717c…`) birebir tutuyor (`tools/ddc/sig-check.py`).
 
-## Araştırma özeti
+## Bu daldaki değişiklikler
+| Değişiklik | Neden |
+|---|---|
+| displayId ile eşleme (EDID önbelleği yerine) | yukarıdaki erken red |
+| Sürüm dizesi yalnız bilgi; imzalar karar verir | yeniden derlenmiş aynı NVRM'i reddetmemek; farklı derleme imzada düşer |
+| Yanıt beklemesinde (≥40 ms) ne `gS.lock` ne NVRM PM kapısı tutulur; yanıt aşamasında `NVRMGpuReady` yeniden sorulur | uyku başlarken istek beklemesi uykuyu geciktirmesin; GPU uykudaysa kapalı hata |
+| `sendBytes`/`replyBytes` gerçekte taşınanı gösterir (DDC/CI yanıtı: uzunluk baytı + 3) | IOI2CInterface.h sözleşmesi |
+| Adres kuralı `ddcXfer`'de ikinci kez: yazma yalnız 0x37 (ve EDID okumasını başlatan 1 baytlık 0x50 ofseti), okuma 0x37/0x50 | savunma derinliği |
+| Gönderim ≤ 64 bayt, yanıt ≤ 256 bayt, gecikme ≤ 500 ms | sınırlı boyut/süre |
+| Kapatma: `nvddc=0` **veya** `-nvrmnoddc` | iki ad da çalışsın |
+| `tools/ddc/abi-check.sh`, `tools/ddc/sig-check.py` | RM struct kopyaları ↔ NVIDIA başlıkları; NVRM imzaları ↔ ikili |
+| `.github/workflows/ddc.yml` (macos-14) | derleme + kontroller + ön sürüm `ddc-claude-<sha>` |
 
-**macOS DDC (Intel Mac yolu).** `IOFramebuffer::open()` → `IOFramebufferI2CInterface::create()` çerçeve tamponunun
-`IOFBI2CInterfaceInfo` dizisindeki her sözlük için bir `IOI2CInterface` nub'ı oluşturur (anahtarlar: `IOI2CInterfaceID`,
-`IOI2CBusType`, `IOI2CTransactionTypes`, `IOI2CSupportedCommFlags`). Kullanıcı tarafı `IOFBCopyI2CInterfaceForBus` →
-`IOI2CInterfaceOpen` → `IOI2CSendRequest`; çekirdekte `IOI2CInterfaceUserClient::extIO` tamponları 1024 baytlık inline
-tampona koyar, `IOFramebufferI2CInterface::startIO` `fbLock()` altında tip/commFlags süzer ve
-`IOFramebuffer::doI2CRequest(bus, timing, req)` çağırır. Başarı dönüşünde tamamlama (`completion`) sürücünün işidir.
-Kaynak: apple-oss-distributions/IOGraphics (IOGraphics-600) `IOFramebuffer.cpp`, `IOI2CInterface.cpp`, `IOI2CInterface.h`.
+Linux'ta MacKernelSDK ile `nvrm-fb.cpp` sözdizimi denetimi `-Wall -Wextra` uyarısız geçti.
 
-**DDC/CI protokolü (VESA DDC/CI 1.1, MCCS).** 7-bit adres 0x37 (yazma 0x6E, okuma 0x6F), kaynak adresi 0x51.
-VCP okuma: `51 82 01 <vcp> <chk>`, chk = 0x6E XOR tüm baytlar; ≥40 ms bekle; yanıt 11 bayt
-`6E 88 02 <sonuç> <vcp> <tip> <maxH> <maxL> <curH> <curL> <chk>` (chk 0x50 ile başlar). VCP yazma:
-`51 84 03 <vcp> <H> <L> <chk>`, sonra ≥50 ms. Parlaklık 0x10, kontrast 0x12, giriş 0x60. EDID 0x50.
+## CI
+`ddc.yml`: ABI kontrolü → resmî 2.7.1 paketinden NVRM indirilip SHA-256 ve imza kontrolü → `kexts/NVRMFB/build.sh`
+(MacKernelSDK + OGKM 615.78.08) → `ddcprobe` → zip → ön sürüm `ddc-claude-<kısa sha>`.
+**NVRM.kext CI'da derlenemez:** RM'in Darwin derlemesi (`_out/Darwin_x86_64/compile_cmds.sh`, `libnvkernel.a`,
+`libnvkms.a`, NullMoth'un `build-nvrm.sh`'i) depoda yok; `rmcc.py` ve `build-completion-archive.py` bunları hazır
+varsayar. Gerekli olan: NullMoth'un yayınlamadığı RM Darwin derleme betikleri. Bu yüzden DDC yalnız NVRMFB'de;
+NVRM'e dokunulmaz (RM girişleri imzayla bulunur).
 
-**DP ve HDMI.** HDMI: DDC hatları gerçek I2C (NVIDIA: `NV402C_CTRL_CMD_I2C_TRANSACTION`, port = `GET_I2C_PORTID.ddcPortId-1`;
-Intel: GMBUS). DP / USB-C DP alt mode: I2C-over-AUX (NVIDIA: `NV0073_CTRL_CMD_DP_AUXCH_I2C_TRANSFER_CTRL`, 7-bit adres,
-≤256 bayt, RM 16 baytlık AUX parçalarına böler; Intel: AUX_CH_CTL/DATA ile I2C-over-AUX, MOT biti, 16 bayt).
-NVIDIA'nın Linux sürücüsü aynı ikiliyi kullanır (`osapi.c`: `RmDpAuxI2CTransfer`, `RmNonDPAuxI2CTransfer`).
+## Kurulum (Mac'te, NullMoth 2.7.1 kuruluyken)
+1401 uygulamasının imzalı güncelleme denetimi değiştirilmiş kext'i kabul etmez; elle kurulur.
+1. Ön sürümden `NVRMFB-ddc-claude-<sha>.zip` indir, aç: `shasum -a 256 -c SHA256SUMS`.
+2. `sudo ./ddc-install.sh install NVRMFB.kext/Contents/MacOS/NVRMFB` — önce test koleksiyonu kurar, sonra yedekler
+   (`/Library/NullMoth/backup-ddc-<tarih>.XXXX`), yalnız ikiliyi değiştirir, AuxKC'yi `kmutil` ile yeniden kurar.
+3. Yeniden başlat. Monitör menüsünde **DDC/CI açık** olmalı.
+4. Sına: `./ddcprobe` (VCP 0x10 okur), `./ddcprobe <fb> 10 50` (parlaklığı 50 yap).
+5. Durum (sudo gerekmez): `ioreg -r -w0 -c NVRMNVDAFramebuffer -d1 | grep -E 'nvrm-ddc'`
+   — `nvrm-ddc-io` her isteğin durduğu aşamayı ve hata kodunu gösterir.
 
-**NullMoth.** NVRMFB yalnız EDID verir (`hasDDCConnect`/`getDDCBlock`), I2C arayüzü yok. NVRMFB RM'e yalnız NVKMS KAPI
-tablosu ve `callPlatformFunction` ile ulaşır; KAPI'de I2C yok. NVRM `rm_kernel_rmapi_op`'u dışa vermez (Info.plist'te
-`OSBundleCompatibleVersion` yok) ve NVRM bu depodan yeniden derlenemez (RM'in Darwin derlemesi, `compile_cmds.sh`,
-`build-nvrm.sh` yayınlanmamış). Bu yüzden `ddc` dalı RM girişlerini `phys-for-va` adresinden sabit ofset + talimat
-baytı imzasıyla buluyor (yalnız NullMoth 2.7.1 NVRM ikilisi). Alternatif (kernel değişikliği gerektirmeyen):
-NVRM kullanıcı istemcisi (`NVRMUserClient`, `sEsc` → `rm_ioctl`) NVK için tam RM ioctl yolu sunar; HDMI'de
-`NV402C I2C_TRANSACTION` NON_PRIVILEGED olduğundan kullanıcı alanından da yapılabilir, DP AUX I2C ise çekirdek ister
-(`DP_AUXCH_CTRL` ham AUX root ile mümkün). Upstream'de DDC ile ilgili issue/tartışma bu oturumda incelenemedi
-(GitHub API erişimi `nullmoth/*` için kapalıydı).
+## Geri alma
+- `sudo ./ddc-install.sh rollback /Library/NullMoth/backup-ddc-<tarih>.XXXX` + yeniden başlat
+  (önceki deneme yedeği: `/Library/NullMoth/backup-ddc-20261104-165944.NNlg`).
+- Ya da resmî NullMoth 2.7.1 paketini `install.sh` ile yeniden kur.
+- Açılmıyorsa: OpenCore menüsünde boot-arg'a `-nvrmnoddc` ekle (yalnız DDC kapanır) veya
+  "1401: Remove NVIDIA driver" aracı. OpenCore config'i bu dal değiştirmez.
 
-**PG27AQDM VCP 0x10.** Doğrulanmış bir kaynak bulunamadı (web aramasında modele özgü DDC/CI raporu yok). OLED'de ABL
-parlaklığı sınırlar ama OSD'de "Parlaklık" ayarı olduğundan 0x10'un desteklenmesi beklenir; monitör menüsünde
-**DDC/CI açık** olmalı (ASUS menülerinde Sistem Kurulumu altında). Donanımda `tools/ddcprobe` ile doğrulanmalı:
-`ddcprobe` (tüm çerçeve tamponları, VCP 0x10 okur).
+## PG27AQDM ve VCP 0x10
+Doğrulanmış kaynak bulunamadı. OSD'de parlaklık olduğundan 0x10 beklenir (OLED'de ABL sınırlar). Donanımda `ddcprobe` ile
+doğrulanacak.
 
-## Intel tasarımı (WTLIntelGfx, gelecekte `gu605-ddc`)
-- Kanca: `kexts/XeGfxIntelFB/intelfb.cpp` — `XeGfxIntelFramebuffer : IONDRVFramebuffer`. Zaten MMIO ile eDP AUX
-  (`XIFB_AUX_CTL 0x64010`) üzerinden I2C-over-AUX EDID okuyor (`xifbAux`, `xifbI2c`, sabit adres 0x50).
-- Ekle: `start()`'ta `super::start()`'tan önce `IOFBI2CInterfaceInfo` (bus 0, tipler No/Simple/DDCci/Combined,
-  commFlags `kIOI2CUseSubAddressCommFlag`); `doI2CRequest` override: yalnız 0x37 yazma, 0x37/0x50 okuma, ≤128 bayt,
-  16 baytlık AUX parçaları, defer'de ≤7 deneme, toplam süre ≤250 ms, hata → `kIOReturnNoDevice`/`IOError` ve
-  `completion`; boot-arg `-xeintelfbnoddc`. `xifbI2c` adresi parametre olmalı (bugün 0x50 sabit).
-- Port: harici monitör sol USB-C/TB4 → Type-C DDI (TC1..4). AUX yazmaçları XE_LPDP düzeninde; **doğrulanacak**
-  (Linux `drivers/gpu/drm/i915/display/intel_dp_aux_regs.h`, `_XELPDP_USBC1_AUX_CH_CTL` vb. — hafızadan 0x16F610..
-  0x16FC10, bu depoda tanımlı değil). TC portunun DP-alt sahipliği/güç isteği (`intel_tc.c`) olmadan AUX yanıt vermez;
-  bu yüzden önce harici ekran görüntüsü çalışmalı.
-- HDMI (GU605MY'de HDMI NVIDIA'ya bağlı): Intel yolunda GMBUS gerekmez.
+## Sonraki adımlar
+1. CI ön sürümünü kur, `ddcprobe` + `nvrm-ddc-io` çıktısını kaydet.
+2. `at send`/`at reply` + RM hata kodu görülürse: `DP_AUXCH_I2C_TRANSFER_CTRL` GSP'de reddediliyor olabilir →
+   yedek yol `NV0073_CTRL_CMD_DP_AUXCH_CTRL` (ham AUX, I2C-over-AUX komutlarıyla, ≤16 bayt parçalar).
+3. ghelper-mac `ddc-slider` ve Intel `gu605-ddc` (ayrı depolar).
 
-## ghelper-mac kaydırıcı tasarımı (gelecekte `ddc-slider`)
-`IOServiceGetMatchingServices("IOFramebuffer")` → her biri için `IOFBCopyI2CInterfaceForBus(fb,0)`; VCP 0x10 okuması
-(ddcprobe'daki paketler) başarılıysa kaydırıcıyı göster, değilse gizle. Yazma 50 ms aralıkla, sürüklemede son değer
-(debounce ~150 ms). EDID üretici "AUS" + ürün koduyla PG27AQDM seçilir.
-
-## Sonraki adımlar (DDC sırası geldiğinde)
-1. Mac'te: `ioreg ... | grep nvrm-kext-version` ve `nvrm-ddc-io` — DDC-REVIEW.md §1 tablosuyla erken red aşamasını belirle.
-2. `resolve` ise: sürüm dizesini bilgiye indir (imzalar kalsın); kurulu sürüm 2.6.6 ise 2.6.6 imzalarını ekle.
-3. DDC-REVIEW.md §2'deki 3, 6, 7. maddeleri uygula; CI'ya `tools/ddc/abi-check.sh` adımını ekle.
-4. Intel: harici ekran çalıştıktan sonra yukarıdaki tasarımı `gu605-ddc`'de uygula.
-5. ghelper-mac `ddc-slider`.
-
-Geri alma (NVIDIA `ddc` testi için): Mac'teki yedek `/Library/NullMoth/backup-ddc-20261104-165944.NNlg`; ya da resmi
-NullMoth paketini `install.sh` ile yeniden kur (1401 uygulamasının imzalı güncelleme kontrolü değiştirilmiş kext'i
-kabul etmez; elle kurulum yolu `install.sh`/`tools/ddc-install.sh`).
+Ayrıntılı inceleme: `docs/DDC-REVIEW.md`.
