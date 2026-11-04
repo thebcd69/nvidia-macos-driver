@@ -637,6 +637,15 @@ public:
     IOItemCount getConnectionCount() override { return 1; }
     bool hasDDCConnect(IOIndex) override { return !fDpyLost && fEdidSize >= 128; }
     IOReturn getDDCBlock(IOIndex connectIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits options, UInt8 *data, IOByteCount *length) override;
+    // thebcd69 fork: DDC/CI over the IOFramebuffer I2C interface (nvrm-ddc.inc)
+    IOReturn doI2CRequest(UInt32 bus, struct IOI2CBusTiming *timing, struct IOI2CRequest *request) override;
+    void publishDdc();
+    void ddcStatus(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+    NvU32 ddcFindDisplay();
+    IOReturn ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 len);
+    NvU32 fDdcDisplayId = 0, fDdcPort = 0, fDdcEdidKey = 0, fDdcLastStatus = 0, fDdcOk = 0, fDdcErr = 0;
+    unsigned fDdcMode = 0;          // 0 unknown, 1 DisplayPort AUX, 2 DDC port (NV40_I2C)
+    bool fDdcSaidOff = false;
     IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref, void **interruptRef) override;
     IOReturn unregisterInterrupt(void *interruptRef) override { return kIOReturnSuccess; }
     IOReturn setInterruptState(void *interruptRef, UInt32 state) override { return kIOReturnSuccess; }
@@ -2746,6 +2755,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     }
     setName("NVRMFramebuffer");
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
+    publishDdc();                        // thebcd69 fork: before super::start(), IOFramebuffer::open builds the I2C nubs
     if (!super::start(provider)) {
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
         FBLOG("super::start failed after kapiInit succeeded"); return false;
@@ -4368,3 +4378,6 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     FBLOG("registerForInterruptType '%s' -> REFUSED (unsupported)", t);
     return kIOReturnUnsupported;
 }
+
+// thebcd69 fork (branch ddc)
+#include "nvrm-ddc.inc"
