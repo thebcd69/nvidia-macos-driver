@@ -34,6 +34,10 @@ Eski hipotez düzeltmesi: "`nvrm-kext-version` 2.7.1 değil" **yanlıştı** —
 Linux'ta MacKernelSDK ile `nvrm-fb.cpp` sözdizimi denetimi `-Wall -Wextra` uyarısız geçti.
 
 ## CI
+**Son başarılı çalışma:** `0ef8bed` (macos-14, Xcode 16.2) → ön sürüm **`ddc-claude-0ef8bed`**
+(`NVRMFB-ddc-claude-0ef8bed.zip`: NVRMFB.kext, ddcprobe, ddc-install.sh, bu belge, SHA256SUMS, new-symbols.txt).
+Resmî 2.7.1 NVRMFB'ye göre yeni çekirdek sembolleri yalnız `OSNumber::withNumber(ull,uint)`, `__memcpy_chk`,
+`__strlcpy_chk`, `bzero`, `vsnprintf` — hepsi xnu `Libkern.exports`'ta.
 `ddc.yml`: ABI kontrolü → resmî 2.7.1 paketinden NVRM indirilip SHA-256 ve imza kontrolü → `kexts/NVRMFB/build.sh`
 (MacKernelSDK + OGKM 615.78.08) → `ddcprobe` → zip → ön sürüm `ddc-claude-<kısa sha>`.
 **NVRM.kext CI'da derlenemez:** RM'in Darwin derlemesi (`_out/Darwin_x86_64/compile_cmds.sh`, `libnvkernel.a`,
