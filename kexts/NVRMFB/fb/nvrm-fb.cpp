@@ -644,7 +644,7 @@ public:
     NvU32 ddcFindDisplay();
     bool ddcSetupPath();
     IOReturn ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 len);
-    NvU32 fDdcDisplayId = 0, fDdcPort = 0, fDdcEdidKey = 0, fDdcLastStatus = 0, fDdcOk = 0, fDdcErr = 0;
+    NvU32 fDdcCalls = 0, fDdcDisplayId = 0, fDdcPort = 0, fDdcEdidKey = 0, fDdcLastStatus = 0, fDdcOk = 0, fDdcErr = 0;
     unsigned fDdcMode = 0;          // 0 not set up, 1 DisplayPort AUX, 2 DDC port (NV40_I2C)
     bool fDdcSaidOff = false;
     IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref, void **interruptRef) override;

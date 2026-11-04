@@ -107,7 +107,7 @@ static const Sig kPmExit  = { 0x5d40 - 0x15de0, 25,
 
 static bool sigMatch(uintptr_t base, const Sig &s)
 {
-    const NvU8 *p = (const NvU8 *)(base + s.delta);
+    const NvU8 *p = (const NvU8 *)(base + (uintptr_t)s.delta);
     for (unsigned i = 0; i < s.len; i++)
         if (!(s.mask & (1u << i)) && p[i] != s.b[i]) return false;
     return true;
@@ -169,9 +169,9 @@ static bool resolve(IOService *rm, uintptr_t physForVa)
         snprintf(gS.why, sizeof gS.why, "off: NVRM code does not match NullMoth %s", kNvrmVersion);
         return false;
     }
-    gS.op      = (RmapiOpFn)(physForVa + kRmapiOp.delta);
-    gS.pmEnter = (PmEnterFn)(physForVa + kPmEnter.delta);
-    gS.pmExit  = (PmExitFn)(physForVa + kPmExit.delta);
+    gS.op      = (RmapiOpFn)(physForVa + (uintptr_t)kRmapiOp.delta);
+    gS.pmEnter = (PmEnterFn)(physForVa + (uintptr_t)kPmEnter.delta);
+    gS.pmExit  = (PmExitFn)(physForVa + (uintptr_t)kPmExit.delta);
     gS.usable  = true;
     snprintf(gS.why, sizeof gS.why, "ready");
     return true;
@@ -326,53 +326,54 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
     using namespace nvddc;
     if (!req) return kIOReturnBadArgument;
     IOReturn err = kIOReturnSuccess;
+    const char *stage = "start";
     const NvU8 sendA = (NvU8)(req->sendAddress >> 1), replyA = (NvU8)(req->replyAddress >> 1);
     const bool sub = (req->commFlags & kIOI2CUseSubAddressCommFlag) != 0;
     const bool doSend = req->sendTransactionType != kIOI2CNoTransactionType;
     const bool doReply = req->replyTransactionType != kIOI2CNoTransactionType;
 
     do {
-        if (bus != 0 || fInternal || fDpyLost) { err = kIOReturnNoDevice; break; }
+        if (bus != 0 || fInternal || fDpyLost) { err = kIOReturnNoDevice; stage = "bus/internal/lost"; break; }
         if ((doSend && (req->sendTransactionType > kIOI2CCombinedTransactionType || (req->sendAddress & 1))) ||
-            (doReply && req->replyTransactionType > kIOI2CCombinedTransactionType)) { err = kIOReturnUnsupportedMode; break; }
+            (doReply && req->replyTransactionType > kIOI2CCombinedTransactionType)) { err = kIOReturnUnsupportedMode; stage = "type"; break; }
         // Only DDC/CI may be written; DDC/CI and EDID may be read.
-        if ((doSend && sendA != 0x37) || (doReply && replyA != 0x37 && replyA != 0x50)) { err = kIOReturnNotPermitted; break; }
+        if ((doSend && sendA != 0x37) || (doReply && replyA != 0x37 && replyA != 0x50)) { err = kIOReturnNotPermitted; stage = "address"; break; }
         if ((doSend && (!req->sendBuffer || req->sendBytes > 255)) || (doReply && (!req->replyBuffer || req->replyBytes > 256)))
-            { err = kIOReturnBadArgument; break; }
+            { err = kIOReturnBadArgument; stage = "buffer"; break; }
 
         IOService *rm = getProvider();
         while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
         const OSSymbol *ready = OSSymbol::withCString("NVRMGpuReady");
         const IOReturn rr = (rm && ready) ? rm->callPlatformFunction(ready, false, NULL, NULL, NULL, NULL) : kIOReturnNotFound;
         OSSafeReleaseNULL(ready);
-        if (rr != kIOReturnSuccess) { err = kIOReturnOffline; break; }
+        if (rr != kIOReturnSuccess) { err = kIOReturnOffline; stage = "gpu-ready"; fDdcLastStatus = (NvU32)rr; break; }
 
-        if (!gS.lock) { err = kIOReturnNotReady; break; }
+        if (!gS.lock) { err = kIOReturnNotReady; stage = "lock"; break; }
         IOLockLock(gS.lock);
         if (!resolve(rm, (uintptr_t)fPhysForVa)) {
             IOLockUnlock(gS.lock);
             if (!fDdcSaidOff) { fDdcSaidOff = true; ddcStatus("%s", gS.why); }
-            err = kIOReturnUnsupported; break;
+            err = kIOReturnUnsupported; stage = "resolve"; break;
         }
         const int counted = gS.pmEnter();
         NvU32 st = openClient(fGpuId);
         if (st) {
             ddcStatus("RM client setup failed 0x%x", (unsigned)st);
-            err = kIOReturnNoResources;
+            err = kIOReturnNoResources; stage = "client";
         } else {
             // EDID changed (another monitor on this connector): find the RM display again
             NvU32 key = 0; for (unsigned i = 8; i < 12 && i < fEdidSize; i++) key = (key << 8) | fEdid[i];
             if (fDdcEdidKey != key) { fDdcEdidKey = key; fDdcDisplayId = 0; fDdcMode = 0; }
             if (!fDdcDisplayId) { fDdcDisplayId = ddcFindDisplay(); fDdcMode = 0; }
             if (fDdcDisplayId && !fDdcMode && !ddcSetupPath()) fDdcDisplayId = 0;
-            if (!fDdcDisplayId) err = kIOReturnNoDevice;
+            if (!fDdcDisplayId) { err = kIOReturnNoDevice; stage = "display"; }
         }
         if (err == kIOReturnSuccess && doSend) {
             NvU8 tmp[256];
             NvU32 n = 0;
             if (sub) tmp[n++] = req->sendSubAddress;
             memcpy(tmp + n, (const void *)req->sendBuffer, req->sendBytes); n += req->sendBytes;
-            err = ddcXfer(sendA, true, tmp, n);
+            err = ddcXfer(sendA, true, tmp, n); stage = "send";
         }
         if (err == kIOReturnSuccess && doReply) {
             if (doSend) {
@@ -388,7 +389,7 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
                 err = ddcXfer(replyA, true, &sa, 1);
             }
             if (err == kIOReturnSuccess)
-                err = ddcXfer(replyA, false, (NvU8 *)req->replyBuffer, req->replyBytes);
+                { err = ddcXfer(replyA, false, (NvU8 *)req->replyBuffer, req->replyBytes); stage = "reply"; }
         }
         gS.pmExit(counted);
         IOLockUnlock(gS.lock);
@@ -402,6 +403,15 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
     } while (false);
 
     req->result = err;
+    // every request, for ioreg: count, last error, where it stopped (the user-space IOI2CSendRequest does not hand the
+    // per-request result back reliably, so this is the only place a failure shows)
+    {
+        char io[160];
+        snprintf(io, sizeof io, "n %u err 0x%x at %s (rm 0x%x) send %u/%02x/%u reply %u/%02x/%u", (unsigned)++fDdcCalls, err, stage, (unsigned)fDdcLastStatus,
+                 (unsigned)req->sendTransactionType, (unsigned)req->sendAddress, (unsigned)req->sendBytes,
+                 (unsigned)req->replyTransactionType, (unsigned)req->replyAddress, (unsigned)req->replyBytes);
+        setProperty("nvrm-ddc-io", io);
+    }
     if (req->completion) (*req->completion)(req);
     return kIOReturnSuccess;
 }
