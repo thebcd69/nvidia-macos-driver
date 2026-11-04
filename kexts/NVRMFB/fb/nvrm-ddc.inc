@@ -13,8 +13,11 @@
  *   - DisplayPort sinks (the USB-C/TB DP alt-mode port): NV0073_CTRL_CMD_DP_AUXCH_I2C_TRANSFER_CTRL, I2C over the
  *     AUX channel -- what NVIDIA's Linux driver does for its i2c-over-DpAux adapters (osapi.c RmDpAuxI2CTransfer).
  *   - other sinks (HDMI): NV402C_CTRL_CMD_I2C_TRANSACTION on the display's DDC port (RmNonDPAuxI2CTransfer).
- * The RM display is found by comparing RM's cached EDID (GET_EDID_V2, COPY_CACHE -- no bus traffic) with this
- * framebuffer's EDID.
+ * The RM display is this framebuffer's NVKMS display handle: for a display that is not DP-MST, NVKMS's dpy id is its
+ * connector's RM displayId bit (nvkms-rm.c AllocConnectors from NV0073 GET_SUPPORTED, nvAllocDpyEvo(.., displayId)),
+ * and the KAPI handle is nvDpyIdToNvU32() of it. [ddc-ci-claude] WAS: RM's cached EDID (GET_EDID_V2 COPY_CACHE)
+ * compared with ours; NVKMS reads a DisplayPort sink's EDID through its DP library (nvkms-dpy.c ReadEdidFromDP), not
+ * through RM, so for DP sinks RM has no cached EDID and every request stopped at "display" with kIOReturnNoDevice.
  *
  * NVRM exports no RM entry to other kexts (everything goes through callPlatformFunction, and NVRM's Info.plist has
  * no OSBundleCompatibleVersion, so it cannot be linked against). Rebuilding NVRM is not possible from this tree, so
@@ -22,11 +25,12 @@
  * address the framebuffer is given ("phys-for-va" = nv_xnu_phys_for_kernel_va): NVRM's __text keeps its internal
  * layout in the kernel collection, so their distance from it is fixed for one NVRM build. Every address is checked
  * against the instruction bytes of NullMoth 2.7.1's NVRM (masks skip RIP-relative data and call displacements the
- * collection linker rewrites) and NVRM must report nvrm-kext-version 2.7.1. Any mismatch turns DDC off, logged in
- * the framebuffer's "nvrm-ddc" property; nothing else changes.
+ * collection linker rewrites). Any mismatch turns DDC off, logged in the framebuffer's "nvrm-ddc" property; nothing
+ * else changes. [ddc-ci-claude] NVRM's nvrm-kext-version is only reported, not required: the signatures are the check
+ * (tools/ddc/sig-check.py verifies them against an NVRM binary; they match the 2.7.1 release, sha256 9afb717c...).
  *
  * Safety: only the DDC/CI address (0x37, 8-bit 0x6E/0x6F) may be written; EDID (0x50) may be read. The internal
- * panel publishes no bus. Boot-arg nvddc=0 turns the feature off.
+ * panel publishes no bus. Boot-arg nvddc=0 or -nvrmnoddc turns the feature off.
  *
  * Debug without sudo:  ioreg -r -w0 -c NVRMNVDAFramebuffer -d1 | grep nvrm-ddc
  */
@@ -159,21 +163,21 @@ static bool resolve(IOService *rm, uintptr_t physForVa)
 {
     if (gS.resolved) return gS.usable;
     gS.resolved = true;
+    // The version is reported only: the instruction-byte signatures below decide (a rebuilt NVRM with the same code
+    // would carry another version string, a different build with the same string would fail the signatures).
     OSString *ver = rm ? OSDynamicCast(OSString, rm->getProperty("nvrm-kext-version")) : nullptr;
-    if (!ver || !ver->isEqualTo(kNvrmVersion)) {
-        snprintf(gS.why, sizeof gS.why, "off: NVRM %s, this build knows %s", ver ? ver->getCStringNoCopy() : "?", kNvrmVersion);
-        return false;
-    }
-    if (!physForVa || !sigMatch(physForVa, kBase)) { snprintf(gS.why, sizeof gS.why, "off: phys-for-va does not match"); return false; }
+    const char *vs = ver ? ver->getCStringNoCopy() : "?";
+    if (!physForVa || !sigMatch(physForVa, kBase)) {
+        snprintf(gS.why, sizeof gS.why, "off: phys-for-va does not match (NVRM %s)", vs); return false; }
     if (!sigMatch(physForVa, kRmapiOp) || !sigMatch(physForVa, kPmEnter) || !sigMatch(physForVa, kPmExit)) {
-        snprintf(gS.why, sizeof gS.why, "off: NVRM code does not match NullMoth %s", kNvrmVersion);
+        snprintf(gS.why, sizeof gS.why, "off: NVRM %s code does not match NullMoth %s", vs, kNvrmVersion);
         return false;
     }
     gS.op      = (RmapiOpFn)(physForVa + (uintptr_t)kRmapiOp.delta);
     gS.pmEnter = (PmEnterFn)(physForVa + (uintptr_t)kPmEnter.delta);
     gS.pmExit  = (PmExitFn)(physForVa + (uintptr_t)kPmExit.delta);
     gS.usable  = true;
-    snprintf(gS.why, sizeof gS.why, "ready");
+    snprintf(gS.why, sizeof gS.why, "ready (NVRM %s)", vs);
     return true;
 }
 
@@ -219,9 +223,10 @@ void NVRMNVDAFramebuffer::publishDdc()
         IOLock *l = IOLockAlloc();
         if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&nvddc::gS.lock)) IOLockFree(l);
     }
-    int on = 1;
+    int on = 1, flag = 0;
     PE_parse_boot_argn("nvddc", &on, sizeof on);
-    if (!on) { setProperty("nvrm-ddc", "off (boot-arg nvddc=0)"); return; }
+    if (!on || PE_parse_boot_argn("-nvrmnoddc", &flag, sizeof flag)) {
+        setProperty("nvrm-ddc", "off (boot-arg nvddc=0 / -nvrmnoddc)"); return; }
     if (fInternal) return;   // the laptop panel has no DDC/CI; its brightness is the backlight handler
     OSDictionary *bus = OSDictionary::withCapacity(4);
     OSArray *arr = OSArray::withCapacity(1);
@@ -242,28 +247,23 @@ void NVRMNVDAFramebuffer::publishDdc()
     OSSafeReleaseNULL(bus); OSSafeReleaseNULL(arr);
 }
 
-// Which RM display drives this framebuffer: the one whose cached EDID is ours. Serial bytes 12..15 and the checksum
-// are skipped (NVRMFB rewrites them for twin monitors, see the serial hash in the EDID take-over).
+// Which RM display drives this framebuffer: its NVKMS display handle, which for a display that is not DP-MST is the
+// connector's RM displayId (one bit of NV0073 GET_SUPPORTED's mask, see the header). An MST display has a dynamic id
+// RM does not know: no bus for it (fail closed) rather than a guess at which sink on the branch device is ours.
+// [ddc-ci-claude] WAS: an EDID match against RM's EDID cache, which is empty for DP sinks (NVKMS reads their EDID
+// through its DP library), so DP monitors never got past this step.
 NvU32 NVRMNVDAFramebuffer::ddcFindDisplay()
 {
     using namespace nvddc;
-    if (fEdidSize < 128) return 0;
+    const NvU32 id = (NvU32)fDisplay;
     GetSupported gs; zero(&gs, sizeof gs);
     NvU32 st = rmControl(gS.hDisp, kCmdDispGetSupported, &gs, sizeof gs);
     if (st) { ddcStatus("GET_SUPPORTED failed 0x%x", (unsigned)st); return 0; }
-    GetEdidV2 *e = (GetEdidV2 *)IOMalloc(sizeof(GetEdidV2));
-    if (!e) return 0;
-    NvU32 hit = 0;
-    for (NvU32 m = gs.displayMask; m && !hit; m &= m - 1) {
-        const NvU32 id = m & (0u - m);
-        zero(e, sizeof *e);
-        e->displayId = id; e->bufferSize = sizeof e->edidBuffer; e->flags = kEdidCopyCache;
-        if (rmControl(gS.hDisp, kCmdDispGetEdidV2, e, sizeof *e) || e->bufferSize < 128) continue;
-        if (memcmp(e->edidBuffer, fEdid, 12) == 0 && memcmp(e->edidBuffer + 16, fEdid + 16, 111) == 0) hit = id;
+    if (!id || (id & (id - 1)) || !(gs.displayMask & id)) {
+        ddcStatus("display 0x%x is not an RM display (mask 0x%x; DP-MST?)", (unsigned)id, (unsigned)gs.displayMask);
+        return 0;
     }
-    IOFree(e, sizeof(GetEdidV2));
-    if (!hit) ddcStatus("no RM display has this EDID (mask 0x%x)", (unsigned)gs.displayMask);
-    return hit;
+    return id;
 }
 
 // How to reach the display found by ddcFindDisplay: DisplayPort (an SOR running DP) over AUX, anything else through its
@@ -295,12 +295,17 @@ bool NVRMNVDAFramebuffer::ddcSetupPath()
 }
 
 // One raw I2C transfer to 7-bit address `addr`. Called with gS.lock held, inside the PM gate, path set up.
-IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 len)
+// *done gets the bytes actually moved (RM's AUX path reports a short read in size).
+// [ddc-ci-claude] The address rule is checked again here, so no caller can reach another device: writes to 0x37, or
+// the one-byte offset write to 0x50 that starts an EDID read; reads from 0x37 or 0x50.
+IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 len, NvU32 *done)
 {
     using namespace nvddc;
+    if (done) *done = 0;
     if (len == 0) return kIOReturnSuccess;
     if (len > 256) return kIOReturnBadArgument;
-    NvU32 st;
+    if (write ? !(addr == 0x37 || (addr == 0x50 && len == 1)) : !(addr == 0x37 || addr == 0x50)) return kIOReturnNotPermitted;
+    NvU32 st, n = len;
     if (fDdcMode == 1) {
         DpAuxI2c *p = (DpAuxI2c *)IOMalloc(sizeof(DpAuxI2c));
         if (!p) return kIOReturnNoMemory;
@@ -308,7 +313,7 @@ IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 le
         p->displayId = fDdcDisplayId; p->addr = addr; p->bWrite = write; p->size = len;
         if (write) memcpy(p->data, buf, len);
         st = rmControl(gS.hDisp, kCmdDpAuxI2cTransfer, p, sizeof *p);
-        if (st == 0 && !write) memcpy(buf, p->data, p->size < len ? p->size : len);
+        if (st == 0 && !write) { n = p->size < len ? p->size : len; memcpy(buf, p->data, n); }
         IOFree(p, sizeof(DpAuxI2c));
     } else if (fDdcMode == 2) {
         I2cTrans t; zero(&t, sizeof t);
@@ -318,9 +323,24 @@ IOReturn NVRMNVDAFramebuffer::ddcXfer(NvU8 addr, bool write, NvU8 *buf, NvU32 le
         st = rmControl(gS.hI2c, kCmdI2cTransaction, &t, sizeof t);
     } else return kIOReturnNoDevice;
     if (st) { fDdcLastStatus = st; return kIOReturnIOError; }
+    if (done) *done = n;
     return kIOReturnSuccess;
 }
 
+// NVRM's "may the display engine be touched" answer (not in system sleep).
+static IOReturn nvddcGpuReady(IOService *rm)
+{
+    const OSSymbol *ready = OSSymbol::withCString("NVRMGpuReady");
+    const IOReturn rr = (rm && ready) ? rm->callPlatformFunction(ready, false, NULL, NULL, NULL, NULL) : kIOReturnNotFound;
+    OSSafeReleaseNULL(ready);
+    return rr;
+}
+
+// Called by IOFramebufferI2CInterface::startIO with the framebuffer lock held, which also keeps requests on this bus
+// from overlapping. [ddc-ci-claude] The send and the reply are two RM phases: between them (the >= 40 ms DDC/CI reply
+// delay) neither gS.lock nor NVRM's PM gate is held, so a system sleep that starts meanwhile is not held up by the
+// delay; the reply phase checks NVRMGpuReady again and fails closed if the GPU went to standby. sendBytes/replyBytes
+// are set to what was moved, as IOI2CInterface.h specifies (a DDC/CI reply to its embedded length + 3).
 IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, IOI2CRequest *req)
 {
     using namespace nvddc;
@@ -331,6 +351,9 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
     const bool sub = (req->commFlags & kIOI2CUseSubAddressCommFlag) != 0;
     const bool doSend = req->sendTransactionType != kIOI2CNoTransactionType;
     const bool doReply = req->replyTransactionType != kIOI2CNoTransactionType;
+    const UInt32 wantReply = doReply ? req->replyBytes : 0;
+    UInt32 sent = 0, got = 0;
+    IOService *rm = nullptr;
 
     do {
         if (bus != 0 || fInternal || fDpyLost) { err = kIOReturnNoDevice; stage = "bus/internal/lost"; break; }
@@ -338,14 +361,14 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
             (doReply && req->replyTransactionType > kIOI2CCombinedTransactionType)) { err = kIOReturnUnsupportedMode; stage = "type"; break; }
         // Only DDC/CI may be written; DDC/CI and EDID may be read.
         if ((doSend && sendA != 0x37) || (doReply && replyA != 0x37 && replyA != 0x50)) { err = kIOReturnNotPermitted; stage = "address"; break; }
-        if ((doSend && (!req->sendBuffer || req->sendBytes > 255)) || (doReply && (!req->replyBuffer || req->replyBytes > 256)))
+        // A DDC/CI message is at most 32 data bytes plus 3 header bytes; EDID is read a block (<= 256 bytes) at a time.
+        if ((doSend && (!req->sendBuffer || req->sendBytes == 0 || req->sendBytes > 64)) ||
+            (doReply && (!req->replyBuffer || req->replyBytes == 0 || req->replyBytes > 256)))
             { err = kIOReturnBadArgument; stage = "buffer"; break; }
 
-        IOService *rm = getProvider();
+        rm = getProvider();
         while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
-        const OSSymbol *ready = OSSymbol::withCString("NVRMGpuReady");
-        const IOReturn rr = (rm && ready) ? rm->callPlatformFunction(ready, false, NULL, NULL, NULL, NULL) : kIOReturnNotFound;
-        OSSafeReleaseNULL(ready);
+        IOReturn rr = nvddcGpuReady(rm);
         if (rr != kIOReturnSuccess) { err = kIOReturnOffline; stage = "gpu-ready"; fDdcLastStatus = (NvU32)rr; break; }
 
         if (!gS.lock) { err = kIOReturnNotReady; stage = "lock"; break; }
@@ -355,60 +378,77 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, IOI2CBusTiming *timing, I
             if (!fDdcSaidOff) { fDdcSaidOff = true; ddcStatus("%s", gS.why); }
             err = kIOReturnUnsupported; stage = "resolve"; break;
         }
-        const int counted = gS.pmEnter();
+        int counted = gS.pmEnter();
         NvU32 st = openClient(fGpuId);
         if (st) {
             ddcStatus("RM client setup failed 0x%x", (unsigned)st);
             err = kIOReturnNoResources; stage = "client";
         } else {
-            // EDID changed (another monitor on this connector): find the RM display again
-            NvU32 key = 0; for (unsigned i = 8; i < 12 && i < fEdidSize; i++) key = (key << 8) | fEdid[i];
+            // another display on this framebuffer (hot-plug, swapped monitor): find the RM display and path again
+            NvU32 key = (NvU32)fDisplay; for (unsigned i = 8; i < 12 && i < fEdidSize; i++) key = (key << 8 | key >> 24) ^ fEdid[i];
             if (fDdcEdidKey != key) { fDdcEdidKey = key; fDdcDisplayId = 0; fDdcMode = 0; }
             if (!fDdcDisplayId) { fDdcDisplayId = ddcFindDisplay(); fDdcMode = 0; }
             if (fDdcDisplayId && !fDdcMode && !ddcSetupPath()) fDdcDisplayId = 0;
             if (!fDdcDisplayId) { err = kIOReturnNoDevice; stage = "display"; }
         }
         if (err == kIOReturnSuccess && doSend) {
-            NvU8 tmp[256];
-            NvU32 n = 0;
+            NvU8 tmp[65];
+            NvU32 n = 0, d = 0;
             if (sub) tmp[n++] = req->sendSubAddress;
             memcpy(tmp + n, (const void *)req->sendBuffer, req->sendBytes); n += req->sendBytes;
-            err = ddcXfer(sendA, true, tmp, n); stage = "send";
-        }
-        if (err == kIOReturnSuccess && doReply) {
-            if (doSend) {
-                // DDC/CI needs >= 40 ms between a request and reading its reply; honour a longer minReplyDelay
-                uint64_t ns = 0; absolutetime_to_nanoseconds(req->minReplyDelay, &ns);
-                uint32_t ms = (uint32_t)(ns / 1000000ull);
-                if (ms < 40 && replyA == 0x37) ms = 40;
-                if (ms > 500) ms = 500;
-                if (ms) IOSleep(ms);
-            }
-            if (sub && !doSend) {     // a read at a subaddress: write the subaddress first
-                NvU8 sa = req->replySubAddress;
-                err = ddcXfer(replyA, true, &sa, 1);
-            }
-            if (err == kIOReturnSuccess)
-                { err = ddcXfer(replyA, false, (NvU8 *)req->replyBuffer, req->replyBytes); stage = "reply"; }
+            err = ddcXfer(sendA, true, tmp, n, &d); stage = "send";
+            if (err == kIOReturnSuccess) sent = req->sendBytes;
         }
         gS.pmExit(counted);
         IOLockUnlock(gS.lock);
+        if (err != kIOReturnSuccess || !doReply) break;
+
+        if (doSend) {
+            // DDC/CI needs >= 40 ms between a request and reading its reply; honour a longer minReplyDelay up to 500 ms
+            uint64_t ns = 0; absolutetime_to_nanoseconds(req->minReplyDelay, &ns);
+            uint32_t ms = (uint32_t)(ns / 1000000ull);
+            if (ms < 40 && replyA == 0x37) ms = 40;
+            if (ms > 500) ms = 500;
+            if (ms) IOSleep(ms);
+            if ((rr = nvddcGpuReady(rm)) != kIOReturnSuccess) { err = kIOReturnOffline; stage = "gpu-ready (reply)"; fDdcLastStatus = (NvU32)rr; break; }
+        }
+        IOLockLock(gS.lock);
+        counted = gS.pmEnter();
+        if (sub && !doSend) {     // a read at a subaddress: write the subaddress first (EDID offset, or DDC/CI)
+            NvU8 sa = req->replySubAddress;
+            err = ddcXfer(replyA, true, &sa, 1, nullptr); stage = "reply subaddress";
+        }
         if (err == kIOReturnSuccess) {
-            if (fDdcOk++ == 0) ddcStatus("display 0x%x %s: first transfer ok", (unsigned)fDdcDisplayId,
-                                         fDdcMode == 2 ? "DDC port" : "AUX");
-        } else if (err == kIOReturnIOError) {
-            if ((fDdcErr++ & 0x3f) == 0) ddcStatus("transfer to 0x%02x failed, RM 0x%x", (unsigned)(doSend ? sendA : replyA),
-                                                   (unsigned)fDdcLastStatus);
+            NvU32 d = 0;
+            err = ddcXfer(replyA, false, (NvU8 *)req->replyBuffer, wantReply, &d); stage = "reply";
+            got = d;
+        }
+        gS.pmExit(counted);
+        IOLockUnlock(gS.lock);
+        if (err == kIOReturnSuccess && req->replyTransactionType == kIOI2CDDCciReplyTransactionType && got >= 2) {
+            const NvU8 *r = (const NvU8 *)req->replyBuffer;
+            const UInt32 len = (UInt32)(r[1] & 0x7f) + 3;   // source address, length byte, data, checksum
+            if ((r[1] & 0x80) && len < got) got = len;
         }
     } while (false);
+
+    req->sendBytes = sent;
+    req->replyBytes = err == kIOReturnSuccess ? got : 0;
+    if (err == kIOReturnSuccess) {
+        if (fDdcOk++ == 0) ddcStatus("display 0x%x %s: first transfer ok", (unsigned)fDdcDisplayId,
+                                     fDdcMode == 2 ? "DDC port" : "AUX");
+    } else if (err == kIOReturnIOError) {
+        if ((fDdcErr++ & 0x3f) == 0) ddcStatus("transfer to 0x%02x failed at %s, RM 0x%x", (unsigned)(doSend ? sendA : replyA),
+                                               stage, (unsigned)fDdcLastStatus);
+    }
 
     req->result = err;
     // every request, for ioreg: count, last error, where it stopped (the user-space IOI2CSendRequest does not hand the
     // per-request result back reliably, so this is the only place a failure shows)
     {
-        char io[160];
-        snprintf(io, sizeof io, "n %u err 0x%x at %s (rm 0x%x) send %u/%02x/%u reply %u/%02x/%u", (unsigned)++fDdcCalls, err, stage, (unsigned)fDdcLastStatus,
-                 (unsigned)req->sendTransactionType, (unsigned)req->sendAddress, (unsigned)req->sendBytes,
+        char io[180];
+        snprintf(io, sizeof io, "n %u err 0x%x at %s (rm 0x%x) send %u/%02x/%u reply %u/%02x/%u", (unsigned)++fDdcCalls, err, stage,
+                 (unsigned)fDdcLastStatus, (unsigned)req->sendTransactionType, (unsigned)req->sendAddress, (unsigned)sent,
                  (unsigned)req->replyTransactionType, (unsigned)req->replyAddress, (unsigned)req->replyBytes);
         setProperty("nvrm-ddc-io", io);
     }
