@@ -1,5 +1,5 @@
 # thebcd69 fork (personal use, not for upstream): build NVRMFB.kext from source.
-# Stage 1: unmodified NVRMFB (toolchain check against the official 2.7.1 binary).
+# NVRMFB with DDC/CI (docs/DDC-FORK.md) + ddcprobe test tool + ddc-install.sh.
 name: NVRMFB (ddc)
 on:
   push:
@@ -20,10 +20,14 @@ jobs:
           git -C "$RUNNER_TEMP/ogkm" sparse-checkout set kernel-open/nvidia-modeset kernel-open/common/inc
       - name: Build NVRMFB
         run: bash kexts/NVRMFB/build.sh "$RUNNER_TEMP/MacKernelSDK" "$RUNNER_TEMP/ogkm" out 2.7.1
+      - name: Build ddcprobe
+        run: |
+          clang -O2 -Wall -arch x86_64 -mmacosx-version-min=15.0 -framework IOKit -framework CoreFoundation tools/ddcprobe.c -o out/ddcprobe
       - name: Package
         run: |
           SHA=$(git rev-parse --short HEAD)
-          cd out && zip -qr "../NVRMFB-ddc-$SHA.zip" NVRMFB.kext && cd ..
+          cp tools/ddc-install.sh out/
+          cd out && zip -qr "../NVRMFB-ddc-$SHA.zip" NVRMFB.kext ddcprobe ddc-install.sh undefined.txt && cd ..
           ls -l "NVRMFB-ddc-$SHA.zip"
       - uses: actions/upload-artifact@v4
         with:
