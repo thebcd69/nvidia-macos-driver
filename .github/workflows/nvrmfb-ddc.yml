@@ -1,0 +1,38 @@
+# thebcd69 fork (personal use, not for upstream): build NVRMFB.kext from source.
+# Stage 1: unmodified NVRMFB (toolchain check against the official 2.7.1 binary).
+name: NVRMFB (ddc)
+on:
+  push:
+    branches: [ddc]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          git clone -q --depth 1 https://github.com/acidanthera/MacKernelSDK "$RUNNER_TEMP/MacKernelSDK"
+          git clone -q --depth 1 --branch 615.78.08 --filter=blob:none --sparse https://github.com/NVIDIA/open-gpu-kernel-modules "$RUNNER_TEMP/ogkm"
+          git -C "$RUNNER_TEMP/ogkm" sparse-checkout set kernel-open/nvidia-modeset kernel-open/common/inc
+      - name: Build NVRMFB
+        run: bash kexts/NVRMFB/build.sh "$RUNNER_TEMP/MacKernelSDK" "$RUNNER_TEMP/ogkm" out 2.7.1
+      - name: Package
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          cd out && zip -qr "../NVRMFB-ddc-$SHA.zip" NVRMFB.kext && cd ..
+          ls -l "NVRMFB-ddc-$SHA.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NVRMFB-ddc
+          path: NVRMFB-ddc-*.zip
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          gh release create "nvrmfb-ddc-$SHA" "NVRMFB-ddc-$SHA.zip" --prerelease --target "$GITHUB_SHA" \
+            --title "NVRMFB ddc $SHA" --notes "Personal fork build of NVRMFB for NullMoth 2.7.1 (GU605MY). Not an official NullMoth release."
