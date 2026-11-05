@@ -227,6 +227,18 @@ void NVRMNVDAFramebuffer::publishDdc()
     PE_parse_boot_argn("nvddc", &on, sizeof on);
     if (!on || PE_parse_boot_argn("-nvrmnoddc", &flag, sizeof flag)) {
         setProperty("nvrm-ddc", "off (boot-arg nvddc=0 / -nvrmnoddc)"); return; }
+    // [hardware test 2026-11-05, BetterDisplay] Every framebuffer and its NVRMDisplay nub had the same registry path
+    // (.../NVRM/NVRMDisplay/NVRMFramebuffer/display0/AppleDisplay). Apps that find a display's framebuffer from the
+    // display's IODisplayLocation (BetterDisplay on Intel) resolved that path to the FIRST framebuffer - the internal
+    // panel, which has no I2C bus - and offered no DDC for the external monitor. A unit address per framebuffer and
+    // per nub (@<fb-index>) makes each path unique. Set before super::start(), so IODisplay records the new path.
+    {
+        char loc[12];
+        snprintf(loc, sizeof loc, "%x", fIndex);
+        IOService *nub = getProvider();
+        if (nub && !nub->getLocation()) nub->setLocation(loc);
+        if (!getLocation()) setLocation(loc);
+    }
     if (fInternal) return;   // the laptop panel has no DDC/CI; its brightness is the backlight handler
     OSDictionary *bus = OSDictionary::withCapacity(4);
     OSArray *arr = OSArray::withCapacity(1);
