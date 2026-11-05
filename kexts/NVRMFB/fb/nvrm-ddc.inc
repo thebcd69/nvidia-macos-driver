@@ -242,6 +242,16 @@ void NVRMNVDAFramebuffer::publishDdc()
         }
         arr->setObject(bus);
         setProperty(kIOFBI2CInterfaceInfoKey, arr);
+        // [ddc-ci-claude, hardware test 2026-11-05] IOFramebufferI2CInterface::startIO (IOGraphics-600) refuses every
+        // request with kIOReturnOffline unless isPowered(), i.e. pendingPowerState != 0 - before doI2CRequest is ever
+        // called, and IOGraphicsLib's IOI2CSendRequest drops that error (it returns the bus-release result), so
+        // clients saw "success" with their own request bytes as the reply and nvrm-ddc-io never appeared.
+        // pendingPowerState is only ever written by IOFramebuffer::setPowerState (which this class replaces, so it
+        // stayed 0 for good) and by the mux kIOPowerAttribute path. Mark the framebuffer powered once, here, before
+        // super::start() makes it visible (no other thread touches its bitfields yet). The value only gates the I2C
+        // nub; the family's power work reads it only together with pendingPowerChange, which stays clear. Display or
+        // GPU sleep is handled in doI2CRequest itself (NVRMGpuReady, fails closed).
+        pendingPowerState = 1;
         ddcStatus("bus published, idle");
     }
     OSSafeReleaseNULL(bus); OSSafeReleaseNULL(arr);
