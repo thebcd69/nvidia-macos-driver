@@ -19,7 +19,10 @@ jobs:
       - name: Toolchain
         run: |
           set -euo pipefail
-          X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          ls -d /Applications/Xcode_*.app | tr '\n' ' '; echo
+          # the oldest Xcode 16: its SDK's libkmod is built for macOS 15.0, the deployment target (a newer SDK's libkmod makes
+          # the linker warn "built for newer macOS version", and upstream's build stops on any warning)
+          X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | head -1 || true)
           [ -n "$X" ] && sudo xcode-select -s "$X"
           xcodebuild -version; xcrun --show-sdk-path
       - name: NVIDIA open-gpu-kernel-modules 620.70.06 with the patch chain
