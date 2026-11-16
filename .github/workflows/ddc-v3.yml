@@ -1,0 +1,111 @@
+# thebcd69 fork (personal use, not for upstream), branch ddc-v3: NullMoth 3.0's NVRMFB with its DDC/CI bus made visible to
+# IOGraphics (one added dictionary key, kexts/NVRMFB/fb/nvrm-fb.cpp publishDdcBus).
+# The job builds NVRMFB twice with upstream's own build/fb_build.sh against NVIDIA's open-gpu-kernel-modules 620.70.06 with
+# upstream's patch chain applied: once from the unmodified v3.0 source (compared with the NVRMFB of the official 3.0 package,
+# which proves the build environment), once from this branch. It publishes a pre-release ddc3-<sha>.
+name: NVRMFB 3.0 DDC (ddc-v3)
+on:
+  push:
+    branches: [ddc-v3]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version; xcrun --show-sdk-path
+      - name: NVIDIA open-gpu-kernel-modules 620.70.06 with the patch chain
+        run: |
+          set -euo pipefail
+          O="$RUNNER_TEMP/ogkm"
+          git clone -q --depth 1 --branch 620.70.06 --filter=blob:none --sparse https://github.com/NVIDIA/open-gpu-kernel-modules "$O"
+          git -C "$O" sparse-checkout set src/nvidia-modeset src/common src/nvidia/arch/nvalloc/unix/include src/nvidia/src/kernel/gpu/timer
+          git -C "$O" log --oneline -1
+          for f in kexts/NVRM/patches/*.patch; do
+            ok=0
+            for root in "" "src/nvidia-modeset"; do
+              if ( cd "$O/$root" && patch -p1 --fuzz=0 --dry-run < "$GITHUB_WORKSPACE/$f" > /dev/null 2>&1 ); then
+                ( cd "$O/$root" && patch -p1 --fuzz=0 < "$GITHUB_WORKSPACE/$f" > /dev/null ); echo "OK   $(basename "$f") (${root:-tree root})"; ok=1; break
+              fi
+            done
+            [ $ok = 1 ] || { echo "FAIL $(basename "$f")"; exit 1; }
+          done
+          git -C "$O" status --short | head -20
+      - name: Official 3.0 package (reference NVRMFB)
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/rel"; mkdir -p "$D"
+          curl -sSfL -o "$D/p.tgz" https://github.com/nullmoth/nvidia-macos-driver/releases/download/v3.0/nullmoth-nvidia-3.0.tar.gz
+          echo "40f0390d0b7cda75637991879b09abb7f8f7e3e5db2e811196963b3a2cacbcad  $D/p.tgz" | shasum -a 256 -c
+          tar -xzf "$D/p.tgz" -C "$D" pkgroot/Library/Extensions/NVRMFB.kext
+          shasum -a 256 "$D/pkgroot/Library/Extensions/NVRMFB.kext/Contents/MacOS/NVRMFB"
+          shasum -a 256 "$D/pkgroot/Library/Extensions/NVRMFB.kext/Contents/MacOS/NVRMFB" | grep -q '^4d3c4c026629f8d3' || { echo "not the NVRMFB installed on the GU605MY"; exit 1; }
+      - name: Unmodified v3.0 source, built here
+        run: |
+          set -euo pipefail
+          R="$RUNNER_TEMP/ref"; mkdir -p "$R"; cp -R kexts "$R/kexts"
+          curl -sSfL -o "$R/kexts/NVRMFB/fb/nvrm-fb.cpp" https://raw.githubusercontent.com/nullmoth/nvidia-macos-driver/v3.0/kexts/NVRMFB/fb/nvrm-fb.cpp
+          echo "this branch against v3.0 (the whole difference of the framebuffer source):"
+          diff "$R/kexts/NVRMFB/fb/nvrm-fb.cpp" kexts/NVRMFB/fb/nvrm-fb.cpp > "$RUNNER_TEMP/src.diff" || true
+          cat "$RUNNER_TEMP/src.diff"
+          [ "$(grep -c '^[<>]' "$RUNNER_TEMP/src.diff")" -le 14 ] || { echo "more than the one change differs"; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/out-ref"
+          # fb_build.sh finds warn_ceiling.sh beside itself
+          OGKM="$RUNNER_TEMP/ogkm" bash build/fb_build.sh "$R/kexts" "$GITHUB_WORKSPACE/out-ref"
+      - name: This branch
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          OGKM="$RUNNER_TEMP/ogkm" bash build/fb_build.sh "$GITHUB_WORKSPACE/kexts" "$GITHUB_WORKSPACE/out"
+          file out/NVRMFB.kext/Contents/MacOS/NVRMFB
+      - name: Compare the three binaries
+        run: |
+          set -uo pipefail
+          OFF="$RUNNER_TEMP/rel/pkgroot/Library/Extensions/NVRMFB.kext/Contents/MacOS/NVRMFB"
+          REF=out-ref/NVRMFB.kext/Contents/MacOS/NVRMFB; NEW=out/NVRMFB.kext/Contents/MacOS/NVRMFB
+          sec() { otool -s "$2" "$3" "$1" | tail -n +3 | awk '{ $1 = ""; print }' | shasum -a 256 | cut -c1-16; }
+          {
+            echo "NVRMFB: official 3.0 / unmodified source built here / this branch"
+            for b in "$OFF" "$REF" "$NEW"; do
+              echo "$(shasum -a 256 "$b" | cut -c1-16) $(stat -f %z "$b") B  text $(sec "$b" __TEXT __text) cstring $(sec "$b" __TEXT __cstring) const $(sec "$b" __TEXT __const) data $(sec "$b" __DATA __data)  $(size -m "$b" | awk '/Section __text/ { print "text size " $3 }' | head -1)"
+            done
+            nm -u "$OFF" | sort > "$RUNNER_TEMP/u-off.txt"; nm -u "$REF" | sort > "$RUNNER_TEMP/u-ref.txt"; nm -u "$NEW" | sort > "$RUNNER_TEMP/u-new.txt"
+            echo "undefined symbols: official $(wc -l < "$RUNNER_TEMP/u-off.txt"), reference $(wc -l < "$RUNNER_TEMP/u-ref.txt"), this branch $(wc -l < "$RUNNER_TEMP/u-new.txt")"
+            echo "official vs reference:"; diff "$RUNNER_TEMP/u-off.txt" "$RUNNER_TEMP/u-ref.txt" && echo "  identical"
+            echo "reference vs this branch:"; diff "$RUNNER_TEMP/u-ref.txt" "$RUNNER_TEMP/u-new.txt" && echo "  identical"
+            nm -g "$OFF" | awk '{ print $NF }' | sort > "$RUNNER_TEMP/g-off.txt"; nm -g "$NEW" | awk '{ print $NF }' | sort > "$RUNNER_TEMP/g-new.txt"
+            echo "exported/undefined names, official vs this branch:"; diff "$RUNNER_TEMP/g-off.txt" "$RUNNER_TEMP/g-new.txt" && echo "  identical"
+            echo "source difference:"; cat "$RUNNER_TEMP/src.diff"
+          } | tee out/REPORT.txt
+          # the two builds made here must want the same kernel symbols; the comparison with the official binary is in the report
+          diff -q "$RUNNER_TEMP/u-ref.txt" "$RUNNER_TEMP/u-new.txt" || { echo "the fix changed the kernel symbols the kext wants"; exit 1; }
+      - name: ddcprobe
+        run: clang -O2 -Wall -arch x86_64 -mmacosx-version-min=15.0 -framework IOKit -framework CoreFoundation tools/ddcprobe.c -o out/ddcprobe
+      - name: Package
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          mkdir -p pk/ref && cp out/NVRMFB.kext/Contents/MacOS/NVRMFB pk/NVRMFB && cp out-ref/NVRMFB.kext/Contents/MacOS/NVRMFB pk/ref/NVRMFB
+          cp out/ddcprobe out/REPORT.txt pk/
+          (cd pk && shasum -a 256 NVRMFB ref/NVRMFB ddcprobe > SHA256SUMS && zip -qr "../NVRMFB-ddc3-$SHA.zip" .)
+          ls -l "NVRMFB-ddc3-$SHA.zip"; cat pk/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NVRMFB-ddc3
+          path: NVRMFB-ddc3-*.zip
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          gh release create "ddc3-$SHA" "NVRMFB-ddc3-$SHA.zip" pk/SHA256SUMS pk/REPORT.txt --prerelease --target "$GITHUB_SHA" \
+            --title "NVRMFB 3.0 DDC $SHA" \
+            --notes "Kişisel fork derlemesi: NullMoth 3.0 NVRMFB + DDC/CI veri yolunun IOGraphics'e görünmesi için tek anahtar (IOI2CInterfaceID). Resmî NullMoth sürümü değildir. NullMoth © NullMoth Systems, PolyForm Noncommercial 1.0.0."

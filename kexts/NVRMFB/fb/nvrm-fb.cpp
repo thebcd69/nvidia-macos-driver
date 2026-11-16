@@ -5593,12 +5593,17 @@ void NVRMNVDAFramebuffer::publishDdcBus()
     fDdcOn = false;
     if (fInternal || !PE_parse_boot_argn("nvrmfbddc", &on, sizeof on) || !on) return;
     OSArray *buses = OSArray::withCapacity(1);
-    OSDictionary *bus = OSDictionary::withCapacity(3);
+    OSDictionary *bus = OSDictionary::withCapacity(4);
+    // [thebcd69 ddc-v3] IOFramebufferI2CInterface::start() (IOGraphicsFamily) leaves at once when the bus dictionary has no
+    // IOI2CInterfaceID, so no I2C interface was ever created and clients found "bus 0 absent" on every framebuffer
+    // (GU605MY + PG27AQDM, NullMoth 3.0, 2026-11-16: property published, IOFBCopyI2CInterfaceForBus failed). One bus: id 0.
+    OSNumber *busId = OSNumber::withNumber((UInt64)0, 32);
     OSNumber *type = OSNumber::withNumber((UInt64)kIOI2CBusTypeI2C, 32);
     OSNumber *tx = OSNumber::withNumber((UInt64)((1u << kIOI2CNoTransactionType) | (1u << kIOI2CSimpleTransactionType) |
                                                  (1u << kIOI2CDDCciReplyTransactionType)), 32);
     OSNumber *flags = OSNumber::withNumber((UInt64)0, 32);
-    if (buses && bus && type && tx && flags) {
+    if (buses && bus && busId && type && tx && flags) {
+        bus->setObject(kIOI2CInterfaceIDKey, busId);
         bus->setObject(kIOI2CBusTypeKey, type); bus->setObject(kIOI2CTransactionTypesKey, tx);
         bus->setObject(kIOI2CSupportedCommFlagsKey, flags);
         buses->setObject(bus);
@@ -5606,7 +5611,7 @@ void NVRMNVDAFramebuffer::publishDdcBus()
         fDdcOn = true;
         FBLOG("fb%u: DDC/CI bus published (nvrmfbddc=1)", fIndex);
     }
-    OSSafeReleaseNULL(flags); OSSafeReleaseNULL(tx); OSSafeReleaseNULL(type); OSSafeReleaseNULL(bus); OSSafeReleaseNULL(buses);
+    OSSafeReleaseNULL(flags); OSSafeReleaseNULL(tx); OSSafeReleaseNULL(type); OSSafeReleaseNULL(busId); OSSafeReleaseNULL(bus); OSSafeReleaseNULL(buses);
 }
 // IOFramebufferI2CInterface::startIO refuses a request while !isPowered() (pendingPowerState == 0). This class replaces
 // setPowerState, which is what sets it in the family, so it stayed 0 and every request was answered "offline" before it
