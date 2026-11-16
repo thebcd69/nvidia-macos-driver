@@ -1,0 +1,49 @@
+diff --git a/kexts/NVRMFB/fb/nvrm-fb.cpp b/kexts/NVRMFB/fb/nvrm-fb.cpp
+index adb034e..e8440fd 100644
+--- a/kexts/NVRMFB/fb/nvrm-fb.cpp
++++ b/kexts/NVRMFB/fb/nvrm-fb.cpp
+@@ -3275,7 +3275,14 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
+         fbGuardCleared("the integrated-GPU panel proxy started");
+         return true;
+     }
+-    { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc); }   // distinct registry path per head
++    // [thebcd69 ddc-v3] The nub above the framebuffer needs the unit address too. NVRM publishes one NVRMDisplay nub per head,
++    // all with the same name and no location, so the path ".../NVRM/NVRMDisplay/NVRMFramebuffer@1" does not resolve: a path
++    // lookup takes the first NVRMDisplay, whose child is head 0 (GU605MY, 3.0, 2026-11-16: IORegistryEntryFromPath on the
++    // PG27AQDM's framebuffer path returned nothing). Apps that reach a display's framebuffer through its registry path
++    // (BetterDisplay on Intel Macs) then find no I2C bus for the external monitor. Same fix as the 2.7.1 fork.
++    { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) {
++          IOService *nub = getProvider(); if (nub && !nub->getLocation()) nub->setLocation(loc);
++          setLocation(loc); } }   // distinct registry path per head
+     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
+     {   // output colour controls from the boot line (see gColorBpc); invalid values are ignored
+         static bool done; if (!done) { done = true;
+@@ -5593,12 +5600,17 @@ void NVRMNVDAFramebuffer::publishDdcBus()
+     fDdcOn = false;
+     if (fInternal || !PE_parse_boot_argn("nvrmfbddc", &on, sizeof on) || !on) return;
+     OSArray *buses = OSArray::withCapacity(1);
+-    OSDictionary *bus = OSDictionary::withCapacity(3);
++    OSDictionary *bus = OSDictionary::withCapacity(4);
++    // [thebcd69 ddc-v3] IOFramebufferI2CInterface::start() (IOGraphicsFamily) leaves at once when the bus dictionary has no
++    // IOI2CInterfaceID, so no I2C interface was ever created and clients found "bus 0 absent" on every framebuffer
++    // (GU605MY + PG27AQDM, NullMoth 3.0, 2026-11-16: property published, IOFBCopyI2CInterfaceForBus failed). One bus: id 0.
++    OSNumber *busId = OSNumber::withNumber((UInt64)0, 32);
+     OSNumber *type = OSNumber::withNumber((UInt64)kIOI2CBusTypeI2C, 32);
+     OSNumber *tx = OSNumber::withNumber((UInt64)((1u << kIOI2CNoTransactionType) | (1u << kIOI2CSimpleTransactionType) |
+                                                  (1u << kIOI2CDDCciReplyTransactionType)), 32);
+     OSNumber *flags = OSNumber::withNumber((UInt64)0, 32);
+-    if (buses && bus && type && tx && flags) {
++    if (buses && bus && busId && type && tx && flags) {
++        bus->setObject(kIOI2CInterfaceIDKey, busId);
+         bus->setObject(kIOI2CBusTypeKey, type); bus->setObject(kIOI2CTransactionTypesKey, tx);
+         bus->setObject(kIOI2CSupportedCommFlagsKey, flags);
+         buses->setObject(bus);
+@@ -5606,7 +5618,7 @@ void NVRMNVDAFramebuffer::publishDdcBus()
+         fDdcOn = true;
+         FBLOG("fb%u: DDC/CI bus published (nvrmfbddc=1)", fIndex);
+     }
+-    OSSafeReleaseNULL(flags); OSSafeReleaseNULL(tx); OSSafeReleaseNULL(type); OSSafeReleaseNULL(bus); OSSafeReleaseNULL(buses);
++    OSSafeReleaseNULL(flags); OSSafeReleaseNULL(tx); OSSafeReleaseNULL(type); OSSafeReleaseNULL(busId); OSSafeReleaseNULL(bus); OSSafeReleaseNULL(buses);
+ }
+ // IOFramebufferI2CInterface::startIO refuses a request while !isPowered() (pendingPowerState == 0). This class replaces
+ // setPowerState, which is what sets it in the family, so it stayed 0 and every request was answered "offline" before it

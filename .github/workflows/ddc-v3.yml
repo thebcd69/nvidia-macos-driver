@@ -1,5 +1,5 @@
 # thebcd69 fork (personal use, not for upstream), branch ddc-v3: NullMoth 3.0's NVRMFB with its DDC/CI bus made visible to
-# IOGraphics (one added dictionary key, kexts/NVRMFB/fb/nvrm-fb.cpp publishDdcBus).
+# IOGraphics and to apps (two small changes in kexts/NVRMFB/fb/nvrm-fb.cpp; docs/GU605-NULLMOTH-GUNCELLEME.md).
 # The job builds NVRMFB twice with upstream's own build/fb_build.sh against NVIDIA's open-gpu-kernel-modules 620.70.06 with
 # upstream's patch chain applied: once from the unmodified v3.0 source (compared with the NVRMFB of the official 3.0 package,
 # which proves the build environment), once from this branch. It publishes a pre-release ddc3-<sha>.
@@ -59,7 +59,7 @@ jobs:
           echo "this branch against v3.0 (the whole difference of the framebuffer source):"
           diff "$R/kexts/NVRMFB/fb/nvrm-fb.cpp" kexts/NVRMFB/fb/nvrm-fb.cpp > "$RUNNER_TEMP/src.diff" || true
           cat "$RUNNER_TEMP/src.diff"
-          [ "$(grep -c '^[<>]' "$RUNNER_TEMP/src.diff")" -le 14 ] || { echo "more than the one change differs"; exit 1; }
+          [ "$(grep -c '^[<>]' "$RUNNER_TEMP/src.diff")" -le 40 ] || { echo "more than the two DDC changes differ"; exit 1; }
           mkdir -p "$GITHUB_WORKSPACE/out-ref"
           # fb_build.sh finds warn_ceiling.sh beside itself
           OGKM="$RUNNER_TEMP/ogkm" bash build/fb_build.sh "$R/kexts" "$GITHUB_WORKSPACE/out-ref"
