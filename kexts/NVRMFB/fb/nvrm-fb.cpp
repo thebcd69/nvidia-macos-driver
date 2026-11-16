@@ -3275,7 +3275,14 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         fbGuardCleared("the integrated-GPU panel proxy started");
         return true;
     }
-    { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc); }   // distinct registry path per head
+    // [thebcd69 ddc-v3] The nub above the framebuffer needs the unit address too. NVRM publishes one NVRMDisplay nub per head,
+    // all with the same name and no location, so the path ".../NVRM/NVRMDisplay/NVRMFramebuffer@1" does not resolve: a path
+    // lookup takes the first NVRMDisplay, whose child is head 0 (GU605MY, 3.0, 2026-11-16: IORegistryEntryFromPath on the
+    // PG27AQDM's framebuffer path returned nothing). Apps that reach a display's framebuffer through its registry path
+    // (BetterDisplay on Intel Macs) then find no I2C bus for the external monitor. Same fix as the 2.7.1 fork.
+    { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) {
+          IOService *nub = getProvider(); if (nub && !nub->getLocation()) nub->setLocation(loc);
+          setLocation(loc); } }   // distinct registry path per head
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
     {   // output colour controls from the boot line (see gColorBpc); invalid values are ignored
         static bool done; if (!done) { done = true;
